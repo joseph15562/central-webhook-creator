@@ -1,5 +1,5 @@
 const AUTH_URL = "https://id.sophos.com/api/v2/oauth2/token";
-const WHOAMI_URL = "https://api.central.sophos.com/whoami";
+const WHOAMI_URL = "https://api.central.sophos.com/whoami/v1";
 
 export interface SophosSession {
   accessToken: string;
