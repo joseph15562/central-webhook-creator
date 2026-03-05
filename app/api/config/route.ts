@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { clientId, clientSecret, webhookUrl, destination } = body;
+    const { clientId, clientSecret, webhookUrl, destination, whatsappToken, recipientPhone } = body;
 
     if (!clientId || !clientSecret || !webhookUrl || !destination) {
       return NextResponse.json(
@@ -71,6 +71,8 @@ export async function POST(req: NextRequest) {
       destination,
       enabled: true,
       createdAt: new Date().toISOString(),
+      whatsappToken,
+      recipientPhone,
     };
 
     await saveConfig(id, config);

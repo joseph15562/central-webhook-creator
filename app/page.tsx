@@ -30,7 +30,7 @@ interface SavedConfig {
   lastPoll?: string;
 }
 
-type Destination = "teams" | "slack" | "generic";
+type Destination = "teams" | "slack" | "whatsapp" | "generic";
 type Step = "credentials" | "configure" | "monitoring";
 
 const POLL_INTERVAL = 30_000;
@@ -43,6 +43,8 @@ interface LocalConfig {
   clientSecret: string;
   webhookUrl: string;
   destination: Destination;
+  whatsappToken?: string;
+  recipientPhone?: string;
 }
 
 function loadLocal(): LocalConfig | null {
@@ -109,6 +111,8 @@ export default function Home() {
 
   const [destination, setDestination] = useState<Destination>("teams");
   const [webhookUrl, setWebhookUrl] = useState("");
+  const [whatsappToken, setWhatsappToken] = useState("");
+  const [recipientPhone, setRecipientPhone] = useState("");
   const [testOk, setTestOk] = useState<boolean | null>(null);
 
   const [monitoring, setMonitoring] = useState(false);
@@ -136,6 +140,8 @@ export default function Home() {
       setClientSecret(saved.clientSecret);
       setWebhookUrl(saved.webhookUrl);
       setDestination(saved.destination);
+      if (saved.whatsappToken) setWhatsappToken(saved.whatsappToken);
+      if (saved.recipientPhone) setRecipientPhone(saved.recipientPhone);
     }
 
     fetch("/api/config")
@@ -155,14 +161,14 @@ export default function Home() {
         const res = await fetch("/api/forward", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ alert, webhookUrl, destination }),
+          body: JSON.stringify({ alert, webhookUrl, destination, whatsappToken, recipientPhone }),
         });
         return res.ok;
       } catch {
         return false;
       }
     },
-    [webhookUrl, destination]
+    [webhookUrl, destination, whatsappToken, recipientPhone]
   );
 
   /* ---- poll + auto-forward ---- */
@@ -239,7 +245,7 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Authentication failed");
       setSession({ accessToken: data.accessToken, tenantId: data.tenantId, dataRegionUrl: data.dataRegionUrl });
-      saveLocal({ clientId, clientSecret, webhookUrl, destination });
+      saveLocal({ clientId, clientSecret, webhookUrl, destination, whatsappToken, recipientPhone });
       setStep("configure");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Authentication failed");
@@ -256,7 +262,7 @@ export default function Home() {
       const res = await fetch("/api/forward/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ webhookUrl, destination }),
+        body: JSON.stringify({ webhookUrl, destination, whatsappToken, recipientPhone }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Test failed");
@@ -277,7 +283,7 @@ export default function Home() {
       const res = await fetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientId, clientSecret, webhookUrl, destination }),
+        body: JSON.stringify({ clientId, clientSecret, webhookUrl, destination, whatsappToken, recipientPhone }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -307,6 +313,8 @@ export default function Home() {
     setClientId("");
     setClientSecret("");
     setWebhookUrl("");
+    setWhatsappToken("");
+    setRecipientPhone("");
     setTestOk(null);
     setAlerts([]);
     setSentIds(new Set());
@@ -411,12 +419,12 @@ export default function Home() {
               <div className="space-y-5">
                 <div>
                   <label className="label">Destination</label>
-                  <div className="grid grid-cols-3 gap-3">
-                    {([["teams", "Microsoft Teams"], ["slack", "Slack"], ["generic", "Generic Webhook"]] as const).map(([val, label]) => (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {([["teams", "Microsoft Teams"], ["slack", "Slack"], ["whatsapp", "WhatsApp"], ["generic", "Generic Webhook"]] as const).map(([val, label]) => (
                       <button
                         key={val}
                         type="button"
-                        onClick={() => { setDestination(val); setTestOk(null); saveLocal({ clientId, clientSecret, webhookUrl, destination: val }); }}
+                        onClick={() => { setDestination(val); setTestOk(null); saveLocal({ clientId, clientSecret, webhookUrl, destination: val, whatsappToken, recipientPhone }); }}
                         className={`rounded-lg border-2 px-3 py-3 text-sm font-medium transition ${destination === val ? "border-sophos-500 bg-sophos-50 text-sophos-700" : "border-gray-200 text-gray-600 hover:border-gray-300"}`}
                       >
                         {label}
@@ -425,22 +433,63 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div>
-                  <label className="label">Incoming Webhook URL <span className="text-red-500">*</span></label>
-                  <input
-                    type="url"
-                    className="input"
-                    value={webhookUrl}
-                    onChange={(e) => { setWebhookUrl(e.target.value); setTestOk(null); saveLocal({ clientId, clientSecret, webhookUrl: e.target.value, destination }); }}
-                    placeholder={destination === "teams" ? "https://yourtenant.webhook.office.com/webhookb2/..." : destination === "slack" ? "https://hooks.slack.com/services/T00/B00/xxx" : "https://your-endpoint.example.com/callback"}
-                    required
-                  />
-                  {destination === "teams" && (
+              <div>
+                <label className="label">
+                  {destination === "whatsapp" ? "WhatsApp API URL" : "Incoming Webhook URL"} <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="url"
+                  className="input"
+                  value={webhookUrl}
+                  onChange={(e) => { setWebhookUrl(e.target.value); setTestOk(null); saveLocal({ clientId, clientSecret, webhookUrl: e.target.value, destination, whatsappToken, recipientPhone }); }}
+                  placeholder={
+                    destination === "teams" ? "https://yourtenant.webhook.office.com/webhookb2/..."
+                    : destination === "slack" ? "https://hooks.slack.com/services/T00/B00/xxx"
+                    : destination === "whatsapp" ? "https://graph.facebook.com/v21.0/PHONE_NUMBER_ID/messages"
+                    : "https://your-endpoint.example.com/callback"
+                  }
+                  required
+                />
+                {destination === "teams" && (
+                  <p className="mt-1.5 text-xs text-gray-400">
+                    In Teams: channel &gt; &bull;&bull;&bull; &gt; Manage channel &gt; Connectors &gt; Incoming Webhook &gt; Configure &gt; copy URL.
+                  </p>
+                )}
+                {destination === "whatsapp" && (
+                  <p className="mt-1.5 text-xs text-gray-400">
+                    Replace PHONE_NUMBER_ID with your WhatsApp Business phone number ID from the Meta Developer dashboard.
+                  </p>
+                )}
+              </div>
+
+              {destination === "whatsapp" && (
+                <>
+                  <div>
+                    <label className="label">WhatsApp Access Token <span className="text-red-500">*</span></label>
+                    <input
+                      type="password"
+                      className="input"
+                      value={whatsappToken}
+                      onChange={(e) => { setWhatsappToken(e.target.value); saveLocal({ clientId, clientSecret, webhookUrl, destination, whatsappToken: e.target.value, recipientPhone }); }}
+                      placeholder="Your Meta / WhatsApp Business API token"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Recipient Phone Number <span className="text-red-500">*</span></label>
+                    <input
+                      className="input"
+                      value={recipientPhone}
+                      onChange={(e) => { setRecipientPhone(e.target.value); saveLocal({ clientId, clientSecret, webhookUrl, destination, whatsappToken, recipientPhone: e.target.value }); }}
+                      placeholder="e.g. 447700900000 (with country code, no +)"
+                      required
+                    />
                     <p className="mt-1.5 text-xs text-gray-400">
-                      In Teams: channel &gt; &bull;&bull;&bull; &gt; Manage channel &gt; Connectors &gt; Incoming Webhook &gt; Configure &gt; copy URL.
+                      The phone number to receive alerts, including country code without the + sign.
                     </p>
-                  )}
-                </div>
+                  </div>
+                </>
+              )}
 
                 {testOk === true && (
                   <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700 flex items-center gap-2">
@@ -455,7 +504,7 @@ export default function Home() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => { saveLocal({ clientId, clientSecret, webhookUrl, destination }); setStep("monitoring"); startMonitoring(); }}
+                    onClick={() => { saveLocal({ clientId, clientSecret, webhookUrl, destination, whatsappToken, recipientPhone }); setStep("monitoring"); startMonitoring(); }}
                     disabled={!webhookUrl}
                     className="btn-primary flex-1"
                   >
@@ -541,7 +590,7 @@ export default function Home() {
                   <div>
                     <p className="text-sm font-semibold text-gray-900">{monitoring ? "Monitoring Active" : "Monitoring Paused"}</p>
                     <p className="text-xs text-gray-500">
-                      Polling every 30s &middot; forwarding to <span className="font-medium">{destination === "teams" ? "Teams" : destination === "slack" ? "Slack" : "Webhook"}</span>
+                      Polling every 30s &middot; forwarding to <span className="font-medium">{destination === "teams" ? "Teams" : destination === "slack" ? "Slack" : destination === "whatsapp" ? "WhatsApp" : "Webhook"}</span>
                     </p>
                   </div>
                 </div>

@@ -205,6 +205,33 @@ function formatSlackPayload(alert: SophosAlert) {
   };
 }
 
+function formatWhatsAppPayload(alert: SophosAlert, recipientPhone: string) {
+  const emoji = severityEmoji(alert.severity);
+  const device = alert.managedAgent?.name || "Unknown device";
+  const time = alert.raisedAt
+    ? new Date(alert.raisedAt).toLocaleString("en-GB", { timeZone: "UTC" })
+    : "Unknown";
+
+  const body = [
+    `${emoji} *Sophos Alert — ${alert.severity?.toUpperCase()}*`,
+    "",
+    `*Type:* ${alert.type || "—"}`,
+    `*Category:* ${alert.category || "—"}`,
+    `*Device:* ${device}`,
+    `*Product:* ${alert.product || "—"}`,
+    `*Time (UTC):* ${time}`,
+    "",
+    alert.description || "No description provided.",
+  ].join("\n");
+
+  return {
+    messaging_product: "whatsapp",
+    to: recipientPhone,
+    type: "text",
+    text: { preview_url: false, body },
+  };
+}
+
 function formatGenericPayload(alert: SophosAlert) {
   return {
     severity: alert.severity,
@@ -220,13 +247,16 @@ function formatGenericPayload(alert: SophosAlert) {
 
 export function formatPayload(
   alert: SophosAlert,
-  destination: "teams" | "slack" | "generic"
+  destination: "teams" | "slack" | "whatsapp" | "generic",
+  recipientPhone?: string
 ) {
   switch (destination) {
     case "teams":
       return formatTeamsCard(alert);
     case "slack":
       return formatSlackPayload(alert);
+    case "whatsapp":
+      return formatWhatsAppPayload(alert, recipientPhone || "");
     default:
       return formatGenericPayload(alert);
   }
@@ -235,13 +265,20 @@ export function formatPayload(
 export async function forwardAlert(
   alert: SophosAlert,
   webhookUrl: string,
-  destination: "teams" | "slack" | "generic"
+  destination: "teams" | "slack" | "whatsapp" | "generic",
+  whatsappToken?: string,
+  recipientPhone?: string
 ): Promise<{ ok: boolean; status: number; body: string }> {
-  const payload = formatPayload(alert, destination);
+  const payload = formatPayload(alert, destination, recipientPhone);
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (destination === "whatsapp" && whatsappToken) {
+    headers["Authorization"] = `Bearer ${whatsappToken}`;
+  }
 
   const res = await fetch(webhookUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(payload),
   });
 

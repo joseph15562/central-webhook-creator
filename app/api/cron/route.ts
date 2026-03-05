@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
         if (config.lastAlertId && alert.id === config.lastAlertId) break;
 
         try {
-          const result = await forwardAlert(alert, config.webhookUrl, config.destination);
+          const result = await forwardAlert(alert, config.webhookUrl, config.destination, config.whatsappToken, config.recipientPhone);
           if (result.ok) forwarded++;
           else errors++;
         } catch {

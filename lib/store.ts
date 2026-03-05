@@ -4,11 +4,13 @@ export interface ForwarderConfig {
   clientId: string;
   clientSecret: string;
   webhookUrl: string;
-  destination: "teams" | "slack" | "generic";
+  destination: "teams" | "slack" | "whatsapp" | "generic";
   enabled: boolean;
   createdAt: string;
   lastPoll?: string;
   lastAlertId?: string;
+  whatsappToken?: string;
+  recipientPhone?: string;
 }
 
 function getRedis(): Redis | null {

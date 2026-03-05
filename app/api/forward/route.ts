@@ -3,11 +3,14 @@ import { forwardAlert, type SophosAlert } from "@/lib/sophos";
 
 export async function POST(req: NextRequest) {
   try {
-    const { alert, webhookUrl, destination } = (await req.json()) as {
-      alert: SophosAlert;
-      webhookUrl: string;
-      destination: "teams" | "slack" | "generic";
-    };
+    const { alert, webhookUrl, destination, whatsappToken, recipientPhone } =
+      (await req.json()) as {
+        alert: SophosAlert;
+        webhookUrl: string;
+        destination: "teams" | "slack" | "whatsapp" | "generic";
+        whatsappToken?: string;
+        recipientPhone?: string;
+      };
 
     if (!alert || !webhookUrl || !destination) {
       return NextResponse.json(
@@ -16,14 +19,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await forwardAlert(alert, webhookUrl, destination);
+    const result = await forwardAlert(
+      alert,
+      webhookUrl,
+      destination,
+      whatsappToken,
+      recipientPhone
+    );
 
     if (!result.ok) {
       return NextResponse.json(
-        {
-          error: `Destination returned ${result.status}`,
-          detail: result.body,
-        },
+        { error: `Destination returned ${result.status}`, detail: result.body },
         { status: 502 }
       );
     }
