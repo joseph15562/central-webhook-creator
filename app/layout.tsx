@@ -5,8 +5,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Sophos Webhook Central",
-  description: "Create and manage Sophos Central webhooks",
+  title: "Sophos Alert Forwarder",
+  description: "Forward Sophos Central alerts to Teams, Slack, or any webhook",
 };
 
 export default function RootLayout({

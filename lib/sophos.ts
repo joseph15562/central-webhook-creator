@@ -8,16 +8,17 @@ export interface SophosSession {
   idType: string;
 }
 
-export interface WebhookPayload {
-  name: string;
-  url: string;
-  events?: string[];
-  enabled?: boolean;
-  description?: string;
-  contentType?: string;
-  secret?: string;
-  customHeaders?: Record<string, string>;
-  requestFormat?: string;
+export interface SophosAlert {
+  id: string;
+  severity: string;
+  raisedAt: string;
+  description: string;
+  type: string;
+  category: string;
+  product: string;
+  managedAgent?: { name?: string; type?: string };
+  tenant?: { id?: string; name?: string };
+  [key: string]: unknown;
 }
 
 export async function authenticate(
@@ -92,67 +93,158 @@ function apiHeaders(session: SophosSession) {
   };
 }
 
-function webhooksUrl(session: SophosSession) {
-  return `${session.dataRegionUrl.replace(/\/$/, "")}/common/v1/webhooks`;
-}
-
-export async function createWebhook(
+export async function fetchAlerts(
   session: SophosSession,
-  payload: WebhookPayload
-) {
-  const body: Record<string, unknown> = {
-    name: payload.name,
-    url: payload.url,
-    enabled: payload.enabled ?? true,
-    requestFormat: payload.requestFormat || "json",
-    contentType: payload.contentType || "application/json",
-  };
-  if (payload.description) body.description = payload.description;
-  if (payload.events?.length) body.events = payload.events;
-  if (payload.secret) body.secret = payload.secret;
-  if (payload.customHeaders && Object.keys(payload.customHeaders).length > 0) {
-    body.customHeaders = payload.customHeaders;
-  }
+  limit = 25
+): Promise<SophosAlert[]> {
+  const url = `${session.dataRegionUrl.replace(/\/$/, "")}/common/v1/alerts?pageSize=${limit}&sort=raisedAt:desc`;
 
-  const res = await fetch(webhooksUrl(session), {
-    method: "POST",
-    headers: apiHeaders(session),
-    body: JSON.stringify(body),
-  });
+  const res = await fetch(url, { headers: apiHeaders(session) });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Create webhook failed (${res.status}): ${text}`);
-  }
-  return res.json();
-}
-
-export async function listWebhooks(session: SophosSession) {
-  const res = await fetch(webhooksUrl(session), {
-    headers: apiHeaders(session),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`List webhooks failed (${res.status}): ${text}`);
+    throw new Error(`Fetch alerts failed (${res.status}): ${text}`);
   }
 
   const data = await res.json();
-  return data.items ?? (Array.isArray(data) ? data : [data]);
+  return data.items ?? [];
 }
 
-export async function deleteWebhook(
-  session: SophosSession,
-  webhookId: string
+function severityEmoji(severity: string): string {
+  switch (severity?.toLowerCase()) {
+    case "high":
+      return "🔴";
+    case "medium":
+      return "🟠";
+    case "low":
+      return "🟡";
+    default:
+      return "⚪";
+  }
+}
+
+function formatTeamsCard(alert: SophosAlert) {
+  const emoji = severityEmoji(alert.severity);
+  const device = alert.managedAgent?.name || "Unknown device";
+  const time = alert.raisedAt
+    ? new Date(alert.raisedAt).toLocaleString("en-GB", { timeZone: "UTC" })
+    : "Unknown";
+
+  return {
+    type: "message",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        contentUrl: null,
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.4",
+          body: [
+            {
+              type: "TextBlock",
+              text: `${emoji} Sophos Alert — ${alert.severity?.toUpperCase()}`,
+              weight: "Bolder",
+              size: "Medium",
+              wrap: true,
+            },
+            {
+              type: "FactSet",
+              facts: [
+                { title: "Type", value: alert.type || "—" },
+                { title: "Category", value: alert.category || "—" },
+                { title: "Device", value: device },
+                { title: "Product", value: alert.product || "—" },
+                { title: "Time (UTC)", value: time },
+              ],
+            },
+            {
+              type: "TextBlock",
+              text: alert.description || "No description provided.",
+              wrap: true,
+              spacing: "Medium",
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
+function formatSlackPayload(alert: SophosAlert) {
+  const emoji = severityEmoji(alert.severity);
+  const device = alert.managedAgent?.name || "Unknown device";
+
+  return {
+    text: `${emoji} *Sophos Alert — ${alert.severity?.toUpperCase()}*`,
+    blocks: [
+      {
+        type: "header",
+        text: {
+          type: "plain_text",
+          text: `${emoji} Sophos Alert — ${alert.severity?.toUpperCase()}`,
+        },
+      },
+      {
+        type: "section",
+        fields: [
+          { type: "mrkdwn", text: `*Type:* ${alert.type || "—"}` },
+          { type: "mrkdwn", text: `*Category:* ${alert.category || "—"}` },
+          { type: "mrkdwn", text: `*Device:* ${device}` },
+          { type: "mrkdwn", text: `*Product:* ${alert.product || "—"}` },
+        ],
+      },
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: alert.description || "No description provided.",
+        },
+      },
+    ],
+  };
+}
+
+function formatGenericPayload(alert: SophosAlert) {
+  return {
+    severity: alert.severity,
+    type: alert.type,
+    category: alert.category,
+    description: alert.description,
+    device: alert.managedAgent?.name || "Unknown",
+    product: alert.product,
+    raisedAt: alert.raisedAt,
+    alertId: alert.id,
+  };
+}
+
+export function formatPayload(
+  alert: SophosAlert,
+  destination: "teams" | "slack" | "generic"
 ) {
-  const res = await fetch(`${webhooksUrl(session)}/${webhookId}`, {
-    method: "DELETE",
-    headers: apiHeaders(session),
+  switch (destination) {
+    case "teams":
+      return formatTeamsCard(alert);
+    case "slack":
+      return formatSlackPayload(alert);
+    default:
+      return formatGenericPayload(alert);
+  }
+}
+
+export async function forwardAlert(
+  alert: SophosAlert,
+  webhookUrl: string,
+  destination: "teams" | "slack" | "generic"
+): Promise<{ ok: boolean; status: number; body: string }> {
+  const payload = formatPayload(alert, destination);
+
+  const res = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Delete webhook failed (${res.status}): ${text}`);
-  }
-  return true;
+  const body = await res.text();
+  return { ok: res.ok, status: res.status, body };
 }

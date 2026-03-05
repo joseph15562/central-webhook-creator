@@ -10,15 +10,20 @@ interface Session {
   dataRegionUrl: string;
 }
 
-interface Webhook {
+interface Alert {
   id: string;
-  name: string;
-  url: string;
-  enabled: boolean;
+  severity: string;
+  raisedAt: string;
+  description: string;
+  type: string;
+  category: string;
+  product: string;
+  managedAgent?: { name?: string; type?: string };
   [key: string]: unknown;
 }
 
-type Step = "credentials" | "action" | "create" | "list" | "success";
+type Destination = "teams" | "slack" | "generic";
+type Step = "credentials" | "configure" | "alerts" | "done";
 
 /* ---------- helpers ---------- */
 
@@ -29,6 +34,19 @@ function sessionHeaders(s: Session) {
     "x-sophos-region": s.dataRegionUrl,
     "Content-Type": "application/json",
   };
+}
+
+function severityColor(s: string) {
+  switch (s?.toLowerCase()) {
+    case "high":
+      return "bg-red-100 text-red-700";
+    case "medium":
+      return "bg-orange-100 text-orange-700";
+    case "low":
+      return "bg-yellow-100 text-yellow-700";
+    default:
+      return "bg-gray-100 text-gray-600";
+  }
 }
 
 /* ================================================================== */
@@ -45,17 +63,15 @@ export default function Home() {
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
 
-  /* create form */
-  const [whName, setWhName] = useState("");
-  const [whUrl, setWhUrl] = useState("");
-  const [whDesc, setWhDesc] = useState("");
-  const [whEvents, setWhEvents] = useState("");
-  const [whSecret, setWhSecret] = useState("");
-  const [whEnabled, setWhEnabled] = useState(true);
-  const [createdWebhook, setCreatedWebhook] = useState<Record<string, unknown> | null>(null);
+  /* destination config */
+  const [destination, setDestination] = useState<Destination>("teams");
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [testOk, setTestOk] = useState<boolean | null>(null);
 
-  /* list */
-  const [webhooks, setWebhooks] = useState<Webhook[]>([]);
+  /* alerts */
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [forwarding, setForwarding] = useState<Record<string, "sending" | "sent" | "error">>({});
+  const [forwardAllStatus, setForwardAllStatus] = useState<"idle" | "sending" | "done">("idle");
 
   /* ---- actions ---- */
 
@@ -76,7 +92,7 @@ export default function Home() {
         tenantId: data.tenantId,
         dataRegionUrl: data.dataRegionUrl,
       });
-      setStep("action");
+      setStep("configure");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
@@ -84,72 +100,70 @@ export default function Home() {
     }
   }
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    if (!session) return;
+  async function handleTest() {
     setError("");
     setLoading(true);
+    setTestOk(null);
     try {
-      const payload: Record<string, unknown> = {
-        name: whName,
-        url: whUrl,
-        enabled: whEnabled,
-      };
-      if (whDesc) payload.description = whDesc;
-      if (whEvents) payload.events = whEvents.split(",").map((s) => s.trim());
-      if (whSecret) payload.secret = whSecret;
-
-      const res = await fetch("/api/webhooks", {
+      const res = await fetch("/api/forward/test", {
         method: "POST",
-        headers: sessionHeaders(session),
-        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ webhookUrl, destination }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to create webhook");
-      setCreatedWebhook(data);
-      setStep("success");
+      if (!res.ok) throw new Error(data.error || "Test failed");
+      setTestOk(true);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to create webhook");
+      setTestOk(false);
+      setError(err instanceof Error ? err.message : "Test failed");
     } finally {
       setLoading(false);
     }
   }
 
-  async function loadWebhooks() {
+  async function loadAlerts() {
     if (!session) return;
     setError("");
     setLoading(true);
     try {
-      const res = await fetch("/api/webhooks", {
+      const res = await fetch("/api/alerts?limit=50", {
         headers: sessionHeaders(session),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to list webhooks");
-      setWebhooks(data.items ?? []);
-      setStep("list");
+      if (!res.ok) throw new Error(data.error || "Failed to fetch alerts");
+      setAlerts(data.items ?? []);
+      setForwarding({});
+      setForwardAllStatus("idle");
+      setStep("alerts");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to list webhooks");
+      setError(err instanceof Error ? err.message : "Failed to fetch alerts");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleDelete(id: string) {
-    if (!session || !confirm("Delete this webhook?")) return;
-    setError("");
+  async function forwardOne(alert: Alert) {
+    setForwarding((p) => ({ ...p, [alert.id]: "sending" }));
     try {
-      const res = await fetch(`/api/webhooks/${id}`, {
-        method: "DELETE",
-        headers: sessionHeaders(session),
+      const res = await fetch("/api/forward", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alert, webhookUrl, destination }),
       });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Delete failed");
-      }
-      setWebhooks((prev) => prev.filter((w) => w.id !== id));
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Delete failed");
+      if (!res.ok) throw new Error();
+      setForwarding((p) => ({ ...p, [alert.id]: "sent" }));
+    } catch {
+      setForwarding((p) => ({ ...p, [alert.id]: "error" }));
     }
+  }
+
+  async function forwardAll() {
+    setForwardAllStatus("sending");
+    for (const alert of alerts) {
+      if (forwarding[alert.id] === "sent") continue;
+      await forwardOne(alert);
+    }
+    setForwardAllStatus("done");
   }
 
   function resetAll() {
@@ -158,31 +172,24 @@ export default function Home() {
     setError("");
     setClientId("");
     setClientSecret("");
-    resetCreateForm();
-    setWebhooks([]);
-  }
-
-  function resetCreateForm() {
-    setWhName("");
-    setWhUrl("");
-    setWhDesc("");
-    setWhEvents("");
-    setWhSecret("");
-    setWhEnabled(true);
-    setCreatedWebhook(null);
+    setWebhookUrl("");
+    setTestOk(null);
+    setAlerts([]);
+    setForwarding({});
+    setForwardAllStatus("idle");
   }
 
   /* ---- step indicator ---- */
 
-  const steps: { key: Step | "action"; label: string }[] = [
-    { key: "credentials", label: "Authenticate" },
-    { key: "action", label: "Choose Action" },
-    { key: "create", label: "Configure" },
+  const steps = [
+    { label: "Authenticate" },
+    { label: "Configure" },
+    { label: "Alerts" },
   ];
 
   function activeIdx() {
     if (step === "credentials") return 0;
-    if (step === "action") return 1;
+    if (step === "configure") return 1;
     return 2;
   }
 
@@ -191,7 +198,7 @@ export default function Home() {
   /* ================================================================ */
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen flex flex-col">
       {/* header */}
       <header className="border-b border-gray-200 bg-white">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
@@ -201,9 +208,9 @@ export default function Home() {
             </div>
             <div>
               <h1 className="text-lg font-bold text-gray-900">
-                Webhook Central
+                Alert Forwarder
               </h1>
-              <p className="text-xs text-gray-500">Sophos Central API</p>
+              <p className="text-xs text-gray-500">Sophos Central → Teams / Slack / Webhook</p>
             </div>
           </div>
           {session && (
@@ -214,12 +221,12 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-3xl px-6 py-10">
+      <main className="mx-auto w-full max-w-3xl flex-1 px-6 py-10">
         {/* step indicator */}
-        {step !== "success" && (
+        {step !== "done" && (
           <nav className="mb-10 flex items-center justify-center gap-2">
             {steps.map((s, i) => (
-              <div key={s.key} className="flex items-center gap-2">
+              <div key={s.label} className="flex items-center gap-2">
                 <div
                   className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold transition ${
                     i <= activeIdx()
@@ -264,12 +271,12 @@ export default function Home() {
           </div>
         )}
 
-        {/* -------- STEP: CREDENTIALS -------- */}
+        {/* -------- STEP 1: CREDENTIALS -------- */}
         {step === "credentials" && (
           <div className="card">
             <h2 className="mb-1 text-xl font-bold">Connect to Sophos Central</h2>
             <p className="mb-6 text-sm text-gray-500">
-              Enter your tenant-level API credentials. You can generate these under{" "}
+              Enter your tenant-level API credentials. Generate these under{" "}
               <span className="font-medium text-gray-700">
                 Global Settings &gt; API Credentials
               </span>{" "}
@@ -301,256 +308,205 @@ export default function Home() {
                 Your credentials are only used for this session and are never stored on our servers.
               </div>
               <button type="submit" disabled={loading} className="btn-primary w-full">
-                {loading ? (
-                  <>
-                    <Spinner /> Authenticating...
-                  </>
-                ) : (
-                  "Connect"
-                )}
+                {loading ? <><Spinner /> Authenticating...</> : "Connect"}
               </button>
             </form>
           </div>
         )}
 
-        {/* -------- STEP: ACTION PICKER -------- */}
-        {step === "action" && session && (
-          <div className="space-y-4">
-            <div className="card">
-              <div className="mb-4 flex items-center gap-2 text-sm">
-                <span className="inline-flex h-2 w-2 rounded-full bg-green-500" />
-                <span className="text-gray-600">
-                  Connected to tenant{" "}
-                  <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">
-                    {session.tenantId}
-                  </code>
-                </span>
-              </div>
-              <h2 className="mb-1 text-xl font-bold">What would you like to do?</h2>
-              <p className="mb-6 text-sm text-gray-500">
-                Create a new webhook or manage existing ones.
-              </p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <button
-                  onClick={() => {
-                    setError("");
-                    resetCreateForm();
-                    setStep("create");
-                  }}
-                  className="group card flex flex-col items-center gap-3 p-6 text-center transition hover:border-sophos-500 hover:shadow-md"
-                >
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-sophos-50 text-sophos-500 transition group-hover:bg-sophos-500 group-hover:text-white">
-                    <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-gray-900">Create Webhook</p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Set up a new webhook endpoint
-                    </p>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => {
-                    setError("");
-                    loadWebhooks();
-                  }}
-                  className="group card flex flex-col items-center gap-3 p-6 text-center transition hover:border-sophos-500 hover:shadow-md"
-                >
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-sophos-50 text-sophos-500 transition group-hover:bg-sophos-500 group-hover:text-white">
-                    <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-gray-900">View Webhooks</p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      List and manage existing webhooks
-                    </p>
-                  </div>
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* -------- STEP: CREATE FORM -------- */}
-        {step === "create" && session && (
+        {/* -------- STEP 2: CONFIGURE DESTINATION -------- */}
+        {step === "configure" && session && (
           <div className="card">
-            <h2 className="mb-1 text-xl font-bold">Create Webhook</h2>
+            <div className="mb-4 flex items-center gap-2 text-sm">
+              <span className="inline-flex h-2 w-2 rounded-full bg-green-500" />
+              <span className="text-gray-600">
+                Connected &mdash; tenant{" "}
+                <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">
+                  {session.tenantId}
+                </code>
+              </span>
+            </div>
+
+            <h2 className="mb-1 text-xl font-bold">Configure Destination</h2>
             <p className="mb-6 text-sm text-gray-500">
-              Configure the webhook that Sophos Central will POST events to.
+              Choose where Sophos alerts should be forwarded and paste the incoming webhook URL.
             </p>
-            <form onSubmit={handleCreate} className="space-y-4">
+
+            <div className="space-y-5">
+              {/* destination picker */}
               <div>
-                <label className="label">
-                  Name <span className="text-red-500">*</span>
-                </label>
-                <input
-                  className="input"
-                  value={whName}
-                  onChange={(e) => setWhName(e.target.value)}
-                  placeholder="e.g. My SIEM Webhook"
-                  required
-                />
+                <label className="label">Destination</label>
+                <div className="grid grid-cols-3 gap-3">
+                  {(
+                    [
+                      ["teams", "Microsoft Teams"],
+                      ["slack", "Slack"],
+                      ["generic", "Generic Webhook"],
+                    ] as const
+                  ).map(([val, label]) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => { setDestination(val); setTestOk(null); }}
+                      className={`rounded-lg border-2 px-3 py-3 text-sm font-medium transition ${
+                        destination === val
+                          ? "border-sophos-500 bg-sophos-50 text-sophos-700"
+                          : "border-gray-200 text-gray-600 hover:border-gray-300"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
+              {/* webhook URL */}
               <div>
                 <label className="label">
-                  Callback URL <span className="text-red-500">*</span>
+                  Incoming Webhook URL <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="url"
                   className="input"
-                  value={whUrl}
-                  onChange={(e) => setWhUrl(e.target.value)}
-                  placeholder="https://my-siem.example.com/sophos-events"
+                  value={webhookUrl}
+                  onChange={(e) => { setWebhookUrl(e.target.value); setTestOk(null); }}
+                  placeholder={
+                    destination === "teams"
+                      ? "https://yourtenant.webhook.office.com/webhookb2/..."
+                      : destination === "slack"
+                        ? "https://hooks.slack.com/services/T00/B00/xxx"
+                        : "https://your-endpoint.example.com/callback"
+                  }
                   required
                 />
+                {destination === "teams" && (
+                  <p className="mt-1.5 text-xs text-gray-400">
+                    In Teams: channel &gt; &bull;&bull;&bull; &gt; Manage channel &gt; Connectors &gt; Incoming Webhook &gt; Configure &gt; copy the URL.
+                  </p>
+                )}
               </div>
 
-              <div>
-                <label className="label">Description</label>
-                <input
-                  className="input"
-                  value={whDesc}
-                  onChange={(e) => setWhDesc(e.target.value)}
-                  placeholder="Forward Sophos alerts to our SIEM"
-                />
-              </div>
+              {/* test result */}
+              {testOk === true && (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700 flex items-center gap-2">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  Test alert sent successfully! Check your {destination === "teams" ? "Teams channel" : destination === "slack" ? "Slack channel" : "endpoint"}.
+                </div>
+              )}
 
-              <div>
-                <label className="label">Events (comma-separated)</label>
-                <input
-                  className="input"
-                  value={whEvents}
-                  onChange={(e) => setWhEvents(e.target.value)}
-                  placeholder="e.g. alert, event"
-                />
-                <p className="mt-1 text-xs text-gray-400">
-                  Leave blank to subscribe to all events.
-                </p>
-              </div>
-
-              <div>
-                <label className="label">Shared Secret (HMAC)</label>
-                <input
-                  type="password"
-                  className="input"
-                  value={whSecret}
-                  onChange={(e) => setWhSecret(e.target.value)}
-                  placeholder="Optional — used to verify payload signatures"
-                />
-              </div>
-
-              <div className="flex items-center gap-3">
+              {/* actions */}
+              <div className="flex gap-3 pt-1">
                 <button
                   type="button"
-                  role="switch"
-                  aria-checked={whEnabled}
-                  onClick={() => setWhEnabled(!whEnabled)}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition ${
-                    whEnabled ? "bg-sophos-500" : "bg-gray-300"
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition ${
-                      whEnabled ? "translate-x-5" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-                <span className="text-sm text-gray-700">
-                  {whEnabled ? "Enabled" : "Disabled"}
-                </span>
-              </div>
-
-              <div className="flex gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setStep("action")}
+                  onClick={handleTest}
+                  disabled={!webhookUrl || loading}
                   className="btn-secondary"
                 >
-                  Back
+                  {loading ? <><Spinner /> Testing...</> : "Send Test Alert"}
                 </button>
-                <button type="submit" disabled={loading} className="btn-primary flex-1">
-                  {loading ? (
-                    <>
-                      <Spinner /> Creating...
-                    </>
-                  ) : (
-                    "Create Webhook"
-                  )}
+                <button
+                  type="button"
+                  onClick={loadAlerts}
+                  disabled={!webhookUrl || loading}
+                  className="btn-primary flex-1"
+                >
+                  {loading && !testOk ? <><Spinner /> Loading...</> : "Fetch Alerts & Forward"}
                 </button>
               </div>
-            </form>
+            </div>
           </div>
         )}
 
-        {/* -------- STEP: LIST -------- */}
-        {step === "list" && session && (
+        {/* -------- STEP 3: ALERTS LIST -------- */}
+        {step === "alerts" && session && (
           <div className="card">
-            <div className="mb-6 flex items-center justify-between">
+            <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <h2 className="text-xl font-bold">Your Webhooks</h2>
+                <h2 className="text-xl font-bold">Sophos Alerts</h2>
                 <p className="text-sm text-gray-500">
-                  {webhooks.length} webhook{webhooks.length !== 1 && "s"} configured
+                  {alerts.length} alert{alerts.length !== 1 && "s"} found &mdash;
+                  forwarding to{" "}
+                  <span className="font-medium text-gray-700">
+                    {destination === "teams" ? "Teams" : destination === "slack" ? "Slack" : "Webhook"}
+                  </span>
                 </p>
               </div>
-              <button onClick={() => setStep("action")} className="btn-secondary text-sm">
-                Back
-              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setStep("configure")} className="btn-secondary text-sm">
+                  Back
+                </button>
+                <button onClick={loadAlerts} disabled={loading} className="btn-secondary text-sm">
+                  {loading ? <Spinner /> : "Refresh"}
+                </button>
+                {alerts.length > 0 && (
+                  <button
+                    onClick={forwardAll}
+                    disabled={forwardAllStatus === "sending"}
+                    className="btn-primary text-sm"
+                  >
+                    {forwardAllStatus === "sending" ? (
+                      <><Spinner /> Sending...</>
+                    ) : forwardAllStatus === "done" ? (
+                      "All Sent"
+                    ) : (
+                      "Forward All"
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
 
-            {webhooks.length === 0 ? (
+            {alerts.length === 0 ? (
               <div className="py-12 text-center">
                 <svg className="mx-auto h-10 w-10 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.172 13.828a4 4 0 015.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                <p className="mt-3 text-sm text-gray-500">No webhooks found.</p>
-                <button
-                  onClick={() => {
-                    resetCreateForm();
-                    setStep("create");
-                  }}
-                  className="btn-primary mt-4"
-                >
-                  Create One
-                </button>
+                <p className="mt-3 text-sm text-gray-500">No alerts at this time.</p>
               </div>
             ) : (
               <ul className="divide-y divide-gray-100">
-                {webhooks.map((wh) => (
-                  <li key={wh.id} className="flex items-center justify-between py-4 first:pt-0 last:pb-0">
+                {alerts.map((a) => (
+                  <li key={a.id} className="flex items-start justify-between gap-4 py-4 first:pt-0 last:pb-0">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <p className="truncate text-sm font-semibold text-gray-900">
-                          {wh.name}
-                        </p>
+                      <div className="flex flex-wrap items-center gap-2">
                         <span
-                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                            wh.enabled
-                              ? "bg-green-100 text-green-700"
-                              : "bg-gray-100 text-gray-500"
-                          }`}
+                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${severityColor(a.severity)}`}
                         >
-                          {wh.enabled ? "Active" : "Disabled"}
+                          {a.severity}
+                        </span>
+                        <span className="text-xs text-gray-400">
+                          {a.raisedAt ? new Date(a.raisedAt).toLocaleString() : "—"}
                         </span>
                       </div>
-                      <p className="mt-0.5 truncate text-xs text-gray-500 font-mono">
-                        {wh.url}
+                      <p className="mt-1 text-sm text-gray-900 line-clamp-2">
+                        {a.description || "No description"}
+                      </p>
+                      <p className="mt-0.5 text-xs text-gray-400">
+                        {a.managedAgent?.name || "Unknown device"} &middot; {a.type}
                       </p>
                     </div>
                     <button
-                      onClick={() => handleDelete(wh.id)}
-                      className="ml-4 shrink-0 rounded-lg p-2 text-gray-400 transition hover:bg-red-50 hover:text-red-600"
-                      title="Delete webhook"
+                      onClick={() => forwardOne(a)}
+                      disabled={forwarding[a.id] === "sending" || forwarding[a.id] === "sent"}
+                      className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                        forwarding[a.id] === "sent"
+                          ? "bg-green-100 text-green-700"
+                          : forwarding[a.id] === "error"
+                            ? "bg-red-100 text-red-700 hover:bg-red-200"
+                            : "bg-gray-100 text-gray-700 hover:bg-sophos-50 hover:text-sophos-700"
+                      }`}
                     >
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
+                      {forwarding[a.id] === "sending" ? (
+                        <Spinner />
+                      ) : forwarding[a.id] === "sent" ? (
+                        "Sent"
+                      ) : forwarding[a.id] === "error" ? (
+                        "Retry"
+                      ) : (
+                        "Forward"
+                      )}
                     </button>
                   </li>
                 ))}
@@ -558,55 +514,11 @@ export default function Home() {
             )}
           </div>
         )}
-
-        {/* -------- STEP: SUCCESS -------- */}
-        {step === "success" && createdWebhook && (
-          <div className="card text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-green-100">
-              <svg className="h-7 w-7 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-            </div>
-            <h2 className="mb-1 text-xl font-bold text-gray-900">
-              Webhook Created!
-            </h2>
-            <p className="mb-6 text-sm text-gray-500">
-              Your webhook has been created and is ready to receive events.
-            </p>
-
-            <div className="mb-6 rounded-lg bg-gray-50 p-4 text-left">
-              <pre className="overflow-x-auto text-xs text-gray-700">
-                {JSON.stringify(createdWebhook, null, 2)}
-              </pre>
-            </div>
-
-            <div className="flex justify-center gap-3">
-              <button
-                onClick={() => {
-                  resetCreateForm();
-                  setStep("action");
-                }}
-                className="btn-secondary"
-              >
-                Back to Menu
-              </button>
-              <button
-                onClick={() => {
-                  resetCreateForm();
-                  setStep("create");
-                }}
-                className="btn-primary"
-              >
-                Create Another
-              </button>
-            </div>
-          </div>
-        )}
       </main>
 
       {/* footer */}
       <footer className="border-t border-gray-200 bg-white py-6 text-center text-xs text-gray-400">
-        Sophos Webhook Central &mdash; Powered by the Sophos Central API
+        Sophos Alert Forwarder &mdash; Powered by the Sophos Central API
       </footer>
     </div>
   );
@@ -616,24 +528,9 @@ export default function Home() {
 
 function Spinner() {
   return (
-    <svg
-      className="h-4 w-4 animate-spin"
-      fill="none"
-      viewBox="0 0 24 24"
-    >
-      <circle
-        className="opacity-25"
-        cx="12"
-        cy="12"
-        r="10"
-        stroke="currentColor"
-        strokeWidth="4"
-      />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-      />
+    <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
     </svg>
   );
 }

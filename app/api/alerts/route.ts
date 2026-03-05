@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { deleteWebhook, type SophosSession } from "@/lib/sophos";
+import { fetchAlerts, type SophosSession } from "@/lib/sophos";
 
 function extractSession(req: NextRequest): SophosSession {
   const accessToken = req.headers.get("x-sophos-token");
@@ -7,23 +7,23 @@ function extractSession(req: NextRequest): SophosSession {
   const dataRegionUrl = req.headers.get("x-sophos-region");
 
   if (!accessToken || !tenantId || !dataRegionUrl) {
-    throw new Error("Missing session headers");
+    throw new Error(
+      "Missing session headers (x-sophos-token, x-sophos-tenant, x-sophos-region)"
+    );
   }
 
   return { accessToken, tenantId, dataRegionUrl, idType: "tenant" };
 }
 
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(req: NextRequest) {
   try {
     const session = extractSession(req);
-    await deleteWebhook(session, params.id);
-    return NextResponse.json({ success: true });
+    const limit = Number(req.nextUrl.searchParams.get("limit") ?? "25");
+    const alerts = await fetchAlerts(session, limit);
+    return NextResponse.json({ items: alerts, count: alerts.length });
   } catch (err: unknown) {
     const message =
-      err instanceof Error ? err.message : "Failed to delete webhook";
+      err instanceof Error ? err.message : "Failed to fetch alerts";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
